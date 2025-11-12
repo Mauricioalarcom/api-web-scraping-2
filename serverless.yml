@@ -1,38 +1,38 @@
-org: diegoalarconm
-service: api-web-scraping
+org: diegoalarconm  # Tu organización en Serverless Framework
+
+service: api-web-scraping  # Nombre del servicio
 
 provider:
-  name: aws
-  runtime: python3.12
-  # Default memory size for functions (default: 1024MB)
-  memorySize: 1024
-  timeout: 30
+  name: aws  # Plataforma
+  runtime: python3.13  # Versión de Python
+  memorySize: 1024  # Tamaño de memoria de la función Lambda
+  timeout: 20  # Tiempo de espera (en segundos) para la función Lambda
   iam:
-    role: arn:aws:iam::520247722169:role/LabRole
+    role: arn:aws:iam::520247722169:role/LabRole  # Rol IAM personalizado
 
 functions:
   scrape_table:
-    handler: scrap_table.lambda_handler  # Asegúrarse de que el nombre del archivo y la función coincidan
+    handler: scrap_table.lambda_handler  # Asegúrate de que el nombre de la función coincida con el nombre del archivo y la función
     package:
       include:
         - ./**  # Incluir todo el contenido del directorio
     events:
       - http:
-          path: /scrape/table
-          method: get
-          cors: true
-          integration: lambda
+          path: /scrape/table  # Ruta del endpoint HTTP
+          method: get  # Método HTTP (GET en este caso)
+          cors: true  # Habilitar CORS
+          integration: lambda  # Integración con Lambda
 
 resources:
   Resources:
     TablaWebScrapping:
-      Type: AWS::DynamoDB::Table
+      Type: AWS::DynamoDB::Table  # Tipo de recurso DynamoDB
       Properties:
-        TableName: TablaWebScrapping
+        TableName: TablaWebScrapping  # Nombre de la tabla en DynamoDB
         AttributeDefinitions:
-          - AttributeName: id
-            AttributeType: S
+          - AttributeName: id  # Atributo de la clave primaria
+            AttributeType: S  # Tipo de dato (cadena)
         KeySchema:
-          - AttributeName: id
-            KeyType: HASH
-        BillingMode: PAY_PER_REQUEST
+          - AttributeName: id  # Clave primaria
+            KeyType: HASH  # Tipo de clave (HASH)
+        BillingMode: PAY_PER_REQUEST  # Facturación por solicitud (sin necesidad de definir capacidades)
