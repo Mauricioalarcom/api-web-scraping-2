@@ -1,49 +1,66 @@
-import requests
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
 from bs4 import BeautifulSoup
 import boto3
 import uuid
+import time
 import json
 
+# Configurar opciones de Selenium para que no abra una ventana de navegador
+chrome_options = Options()
+chrome_options.add_argument("--headless")  # Ejecutar en segundo plano (sin GUI)
+
+# Ruta al chromedriver (ajusta según donde esté instalado)
+service = Service('path_to_chromedriver')  # Cambia esto si es necesario
+
+# Iniciar el navegador con Selenium
+driver = webdriver.Chrome(service=service, options=chrome_options)
+
 def lambda_handler(event, context):
-    # URL de la página web que contiene los últimos sismos
+    # URL de la página web que contiene los sismos
     url = "https://ultimosismo.igp.gob.pe/ultimo-sismo/sismos-reportados"
 
-    # Realizar la solicitud HTTP a la página web
-    response = requests.get(url)
-    if response.status_code != 200:
-        return {
-            'statusCode': response.status_code,
-            'body': 'Error al acceder a la página web'
-        }
+    # Acceder a la página
+    driver.get(url)
 
-    # Parsear el contenido HTML de la página web
-    soup = BeautifulSoup(response.content, 'html.parser')
+    # Esperar un momento para que la página cargue (si es necesario)
+    time.sleep(5)  # Ajusta según tu conexión o página
 
-    # Encontrar la tabla en el HTML
-    table = soup.find('table', class_='tabla_sismos')
+    # Obtener el HTML renderizado
+    html = driver.page_source
+
+    # Parsear el contenido HTML con BeautifulSoup
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # Intentar encontrar la tabla que contiene los sismos (ajusta el selector si es necesario)
+    table = soup.find('table', class_='tabla')  # Cambia según el elemento correcto
+
     if not table:
         return {
             'statusCode': 404,
             'body': 'No se encontró la tabla de sismos en la página web'
         }
 
-    # Extraer los encabezados de la tabla (si existen)
+    # Extraer los encabezados de la tabla
     headers = [header.text.strip() for header in table.find_all('th')]
 
-    # Extraer las filas de la tabla (los últimos 10 sismos)
+    # Extraer las filas de la tabla
     rows = []
-    for row in table.find_all('tr')[1:11]:  # Tomar solo los primeros 10 sismos
+    for row in table.find_all('tr')[1:11]:  # Limitar a los primeros 10 sismos
         cells = row.find_all('td')
-        sismo = {
-            'fecha': cells[0].text.strip(),
-            'hora': cells[1].text.strip(),
-            'latitud': cells[2].text.strip(),
-            'longitud': cells[3].text.strip(),
-            'profundidad': cells[4].text.strip(),
-            'magnitud': cells[5].text.strip(),
-            'lugar': cells[6].text.strip(),
-        }
-        rows.append(sismo)
+        if len(cells) > 0:
+            sismo = {
+                'fecha': cells[0].text.strip(),
+                'hora': cells[1].text.strip(),
+                'latitud': cells[2].text.strip(),
+                'longitud': cells[3].text.strip(),
+                'profundidad': cells[4].text.strip(),
+                'magnitud': cells[5].text.strip(),
+                'lugar': cells[6].text.strip(),
+            }
+            rows.append(sismo)
 
     # Guardar los datos en DynamoDB
     dynamodb = boto3.resource('dynamodb')
@@ -59,6 +76,9 @@ def lambda_handler(event, context):
     for i, sismo in enumerate(rows):
         sismo['id'] = str(uuid.uuid4())  # Generar un ID único para cada entrada
         table.put_item(Item=sismo)
+
+    # Cerrar el navegador Selenium
+    driver.quit()
 
     # Retornar el resultado como JSON
     return {
