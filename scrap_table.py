@@ -1,32 +1,35 @@
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
 from bs4 import BeautifulSoup
 import boto3
 import uuid
 import time
 import json
 
-# Configurar opciones de Selenium para que no abra una ventana de navegador
-chrome_options = Options()
-chrome_options.add_argument("--headless")  # Ejecutar en segundo plano (sin GUI)
-
-# Ruta al chromedriver (ajusta según donde esté instalado)
-service = Service('path_to_chromedriver')  # Cambia esto si es necesario
-
-# Iniciar el navegador con Selenium
-driver = webdriver.Chrome(service=service, options=chrome_options)
-
 def lambda_handler(event, context):
+    # Configurar opciones de Selenium para usar el Chrome instalado en la máquina virtual
+    chrome_options = Options()
+    chrome_options.add_argument('--headless')
+    chrome_options.add_argument('--disable-gpu')
+    chrome_options.add_argument('--no-sandbox')
+
+    # Definir las rutas para el chromedriver y el binario de chromium
+    chrome_options.binary_location = '/usr/bin/chromium-browser'  # Cambia la ruta si es necesario
+    service = Service(executable_path='/usr/bin/chromedriver')  # Cambia la ruta si es necesario
+    
+    # Iniciar Selenium con el Chrome headless y Chromedriver instalado
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+
     # URL de la página web que contiene los sismos
     url = "https://ultimosismo.igp.gob.pe/ultimo-sismo/sismos-reportados"
 
     # Acceder a la página
     driver.get(url)
 
-    # Esperar un momento para que la página cargue (si es necesario)
-    time.sleep(5)  # Ajusta según tu conexión o página
+    # Esperar un momento para que la página cargue
+    time.sleep(5)
 
     # Obtener el HTML renderizado
     html = driver.page_source
@@ -38,6 +41,7 @@ def lambda_handler(event, context):
     table = soup.find('table', class_='tabla')  # Cambia según el elemento correcto
 
     if not table:
+        driver.quit()
         return {
             'statusCode': 404,
             'body': 'No se encontró la tabla de sismos en la página web'
@@ -77,7 +81,7 @@ def lambda_handler(event, context):
         sismo['id'] = str(uuid.uuid4())  # Generar un ID único para cada entrada
         table.put_item(Item=sismo)
 
-    # Cerrar el navegador Selenium
+    # Cerrar el navegador de Selenium
     driver.quit()
 
     # Retornar el resultado como JSON
