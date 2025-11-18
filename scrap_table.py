@@ -1,88 +1,155 @@
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from bs4 import BeautifulSoup
+import os
+import csv
+import logging
+from urllib.parse import urljoin
+from typing import List, Dict
+
 import boto3
-import uuid
-import time
-import json
+from botocore.exceptions import ClientError
+from playwright.sync_api import sync_playwright
+
+# Página objetivo
+BASE_URL = "https://ultimosismo.igp.gob.pe"
+TARGET_URL = urljoin(BASE_URL, "/ultimo-sismo/sismos-reportados")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+def fetch_latest_sismos(limit: int = 10) -> List[Dict]:
+    """Usa Playwright en modo headless para obtener los últimos 'limit' sismos.
+
+    Devuelve una lista de dicts con: referencia, reporte_url, fecha_hora, magnitud.
+    """
+    results = []
+
+    # Ensure font/cache envs available at runtime (Lambda / containers)
+    os.environ.setdefault("XDG_CACHE_HOME", "/tmp/.cache")
+    os.environ.setdefault("FONTCONFIG_PATH", "/tmp/.fontconfig")
+
+    with sync_playwright() as pw:
+        # Launch Chromium with flags suitable for headless containers / Lambda
+        browser = pw.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--disable-background-timer-throttling",
+                "--disable-breakpad",
+                "--no-zygote",
+            ],
+        )
+        context = browser.new_context()
+        page = context.new_page()
+
+        logger.info("Navegando a %s", TARGET_URL)
+        page.goto(TARGET_URL, wait_until="networkidle")
+
+        # Esperar a que la tabla esté presente
+        page.wait_for_selector("table.table tbody tr", timeout=10000)
+
+        rows = page.query_selector_all("table.table tbody tr")
+        logger.info("Filas encontradas: %d", len(rows))
+
+        for i, row in enumerate(rows[:limit]):
+            try:
+                tds = row.query_selector_all("td")
+                # Basado en estructura observada: referencia en tds[0], fecha en tds[2], magnitud en tds[3]
+                referencia = tds[0].inner_text().strip() if len(tds) > 0 else ""
+                fecha_hora = tds[2].inner_text().strip() if len(tds) > 2 else ""
+                magnitud = tds[3].inner_text().strip() if len(tds) > 3 else ""
+
+                # Buscar enlace de reporte dentro de la fila
+                a = row.query_selector("a[href]")
+                href = a.get_attribute("href") if a else None
+                reporte_url = urljoin(BASE_URL, href) if href else None
+
+                # Limpiar referencia: a menudo contiene un salto de línea con código
+                referencia = " ".join([s.strip() for s in referencia.splitlines() if s.strip()])
+
+                item = {
+                    "referencia": referencia,
+                    "reporte_url": reporte_url,
+                    "fecha_hora": fecha_hora,
+                    "magnitud": magnitud,
+                }
+                results.append(item)
+            except Exception as e:
+                logger.exception("Error parseando fila %d: %s", i, e)
+
+        context.close()
+        browser.close()
+
+    return results
+
+
+def save_to_csv(items: List[Dict], path: str = "sismos.csv"):
+    if not items:
+        logger.info("No hay items para guardar en CSV")
+        return
+
+    keys = list(items[0].keys())
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        for it in items:
+            writer.writerow(it)
+
+    logger.info("Guardado %d registros en %s", len(items), path)
+
+
+def save_to_dynamodb(items: List[Dict], table_name: str) -> bool:
+    if not items:
+        logger.info("No hay items para guardar en DynamoDB")
+        return True
+
+    dynamodb = boto3.resource("dynamodb")
+    table = dynamodb.Table(table_name)
+
+    try:
+        with table.batch_writer() as batch:
+            for it in items:
+                # Añadir un id si no existe
+                if "id" not in it:
+                    from uuid import uuid4
+
+                    it["id"] = str(uuid4())
+                batch.put_item(Item=it)
+        logger.info("Guardado %d registros en DynamoDB tabla %s", len(items), table_name)
+        return True
+    except ClientError as e:
+        logger.exception("Error guardando en DynamoDB: %s", e)
+        return False
+
 
 def lambda_handler(event, context):
-    # Configurar opciones de Selenium para usar el navegador headless (sin UI)
-    chrome_options = Options()
-    chrome_options.add_argument('--headless')
-    chrome_options.add_argument('--disable-gpu')
-    chrome_options.add_argument('--no-sandbox')
+    """Handler pensado para uso en AWS Lambda (si Playwright está empaquetado apropiadamente).
 
-    # Ruta al ejecutable de Chrome y Chromedriver (ajústalo según tu entorno)
-    service = Service('/path/to/chromedriver')  # Cambia la ruta de chromedriver si es necesario
-    driver = webdriver.Chrome(service=service, options=chrome_options)
+    Si existe la variable de entorno DDB_TABLE, intenta guardar en DynamoDB; si falla o no existe,
+    guarda en `sismos.csv`.
+    """
+    limit = int(os.environ.get("LIMIT", "10"))
+    items = fetch_latest_sismos(limit=limit)
 
-    # URL de la página web que contiene los sismos
-    url = "https://ultimosismo.igp.gob.pe/ultimo-sismo/sismos-reportados"
+    table_name = os.environ.get("DDB_TABLE")
+    saved = False
+    if table_name:
+        saved = save_to_dynamodb(items, table_name)
 
-    # Acceder a la página web
-    driver.get(url)
+    if not table_name or not saved:
+        save_to_csv(items, path=os.environ.get("CSV_PATH", "sismos.csv"))
 
-    # Esperar que la página cargue completamente (ajusta si es necesario)
-    time.sleep(5)
+    return {"statusCode": 200, "body": items}
 
-    # Obtener el HTML renderizado después de que JavaScript haya cargado la página
-    html = driver.page_source
 
-    # Parsear el HTML con BeautifulSoup
-    soup = BeautifulSoup(html, 'html.parser')
+if __name__ == "__main__":
+    # Ejecución local de ejemplo
+    items = fetch_latest_sismos(limit=10)
 
-    # Intentar encontrar la tabla que contiene los sismos (ajusta el selector si es necesario)
-    table = soup.find('table', {'class': 'tabla'})  # Cambia según el elemento correcto de la página
-
-    if not table:
-        driver.quit()
-        return {
-            'statusCode': 404,
-            'body': 'No se encontró la tabla de sismos en la página web'
-        }
-
-    # Extraer los encabezados de la tabla (si es necesario)
-    headers = [header.text.strip() for header in table.find_all('th')]
-
-    # Extraer las filas de la tabla (limitar a los 10 primeros sismos)
-    rows = []
-    for row in table.find_all('tr')[1:11]:  # Limitar a los primeros 10 sismos
-        cells = row.find_all('td')
-        if len(cells) > 0:
-            sismo = {
-                'fecha': cells[0].text.strip(),
-                'hora': cells[1].text.strip(),
-                'latitud': cells[2].text.strip(),
-                'longitud': cells[3].text.strip(),
-                'profundidad': cells[4].text.strip(),
-                'magnitud': cells[5].text.strip(),
-                'lugar': cells[6].text.strip(),
-            }
-            rows.append(sismo)
-
-    # Guardar los datos en DynamoDB
-    dynamodb = boto3.resource('dynamodb')
-    table = dynamodb.Table('SismosReportados')
-
-    # Eliminar todos los elementos de la tabla antes de agregar los nuevos
-    scan = table.scan()
-    with table.batch_writer() as batch:
-        for each in scan['Items']:
-            batch.delete_item(Key={'id': each['id']})
-
-    # Insertar los nuevos datos en DynamoDB
-    for i, sismo in enumerate(rows):
-        sismo['id'] = str(uuid.uuid4())  # Generar un ID único para cada entrada
-        table.put_item(Item=sismo)
-
-    # Cerrar el navegador de Selenium
-    driver.quit()
-
-    # Retornar el resultado como JSON
-    return {
-        'statusCode': 200,
-        'body': json.dumps(rows)
-    }
+    save_to_csv(items)
+    print(f"Obtenidos {len(items)} registros.")
